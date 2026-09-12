@@ -4,3 +4,5 @@ anomalib
 torch
 torchvision
 numpy
+requests
+gdown

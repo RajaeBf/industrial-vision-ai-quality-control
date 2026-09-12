@@ -5,37 +5,86 @@ Lancement :
     pip install -r requirements.txt
     streamlit run app.py
 
-Le checkpoint attendu est celui produit par ton notebook d'entrainement :
-ANOMALIB_ROOT/Patchcore/<categorie>/last.ckpt
+Le checkpoint attendu est est dans le dossier drive :
+02_doc du projet/checkpoint/<categorie>/<categorie>.ckpt
 """
+import os
 import tempfile
 
 import cv2
 import numpy as np
 import streamlit as st
+import gdown
 
 from patchcore_inference import load_model, analyze_product
 
 st.set_page_config(page_title="Controle qualite - PatchCore", layout="wide")
 st.title("🔍 Controle qualite automatique — PatchCore")
 
+# Checkpoints charges automatiquement au demarrage de la plateforme.
+# Format : {nom_categorie: URL de telechargement direct}
+CKPT_URLS = {
+    "cable": "1xqSKlTAGl5DscPSt47M4hBMyUOwn7Fq3",
+    "bouteille": "1lejiSBVlJ1jz-8ivXGvEElDc1EmEeKsh",
+}
+# Seuil de decision PAR DEFAUT par categorie (modifiable dans la sidebar)
+DEFAULT_THRESHOLDS = {
+    "cable": 42.00,
+    "bouteille": 30.00,
+}
+CKPT_CACHE_DIR = os.path.join(tempfile.gettempdir(), "patchcore_ckpts")
+os.makedirs(CKPT_CACHE_DIR, exist_ok=True)
+
+
+@st.cache_resource(show_spinner="Téléchargement du checkpoint (une seule fois par catégorie)...")
+def _download_ckpt(category: str, file_id: str) -> str:
+    """Télécharge le checkpoint via gdown, contourne automatiquement la page de confirmation des gros fichiers."""
+    dest = os.path.join(CKPT_CACHE_DIR, f"{category}.ckpt")
+    if os.path.exists(dest) and os.path.getsize(dest) > 0:
+        return dest
+    
+    gdown.download(id=file_id, output=dest, quiet=False)
+    return dest
+
 with st.sidebar:
     st.header("Configuration")
-    ckpt_file = st.file_uploader("Checkpoint entraine (.ckpt)", type=["ckpt"])
+    ckpt_source_path = None
+    if CKPT_URLS:
+        category = st.selectbox("Categorie de produit", sorted(CKPT_URLS.keys()))
+        try:
+            ckpt_source_path = _download_ckpt(category, CKPT_URLS[category])
+            st.success(f"✅ Checkpoint '{category}' charge automatiquement")
+        except Exception as e:
+            st.error(f"Echec du telechargement automatique du checkpoint : {e}")
+
+    with st.expander("Utiliser un autre checkpoint (upload manuel)", expanded=ckpt_source_path is None):
+        ckpt_file = st.file_uploader("Checkpoint entraine (.ckpt)", type=["ckpt"])
+        if ckpt_file is not None:
+            with tempfile.NamedTemporaryFile(suffix=".ckpt", delete=False) as f:
+                f.write(ckpt_file.read())
+                ckpt_source_path = f.name
+
+    # Seuil modifiable, pre-rempli avec la valeur par defaut de la categorie
+    if CKPT_URLS:
+        default_threshold = DEFAULT_THRESHOLDS.get(category, 0.5)
+    else:
+        default_threshold = 0.5
+
     threshold = st.number_input(
         "Seuil de decision (score d'anomalie)",
-        min_value=0.0, max_value=1000.0, value=0.5, step=0.1,
+        min_value=0.0,
+        max_value=1000.0,
+        value=float(default_threshold),
+        step=0.1,
+        key=f"threshold_{category if CKPT_URLS else 'default'}",   # reset auto quand on change de categorie
         help=(
             "Le score brut Patchcore n'est PAS borne entre 0 et 1. Utilise "
             "l'onglet 'Calibrer le seuil' pour obtenir une valeur fiable, "
             "puis reporte-la ici."
         ),
     )
+    st.caption(f"Seuil par defaut pour cette categorie : **{default_threshold:.2f}** (modifiable ci-dessus)")
     st.divider()
-    st.caption(
-        "⚠️ Le score est lu directement depuis le sous-modele PyTorch "
-        "(sans la normalisation Lightning, qui semble mal calibree sur ce checkpoint)."
-    )
 
 tab_images, tab_calib = st.tabs(["🖼️ Images individuelles", "🎯 Calibrer le seuil"])
 
@@ -98,16 +147,12 @@ with tab_images:
     run_images = st.button("Lancer l'analyse (images)", type="primary")
 
     if run_images:
-        if ckpt_file is None or not image_files:
-            st.error("Merci d'uploader un checkpoint ET au moins une image.")
+        if ckpt_source_path is None or not image_files:
+            st.error("Merci d'avoir un checkpoint charge (auto ou upload) ET au moins une image.")
             st.stop()
 
-        with tempfile.NamedTemporaryFile(suffix=".ckpt", delete=False) as f:
-            f.write(ckpt_file.read())
-            ckpt_path = f.name
-
         with st.spinner("Chargement du modele..."):
-            model, device = load_model(ckpt_path)
+            model, device = load_model(ckpt_source_path)
 
         items = []
         for img_file in image_files:
@@ -141,20 +186,16 @@ with tab_calib:
         accept_multiple_files=True,
         key="calib_good",
     )
-    margin_pct = st.slider("Marge de securite au-dessus du pire score good (%)", 0, 100, 20, 5)
+    margin_pct = 4 # Marge fixe de 4%
     run_calib = st.button("Calculer le seuil suggere", type="primary")
 
     if run_calib:
-        if ckpt_file is None or not good_files:
-            st.error("Merci d'uploader un checkpoint ET plusieurs images 'good'.")
+        if ckpt_source_path is None or not good_files:
+            st.error("Merci d'avoir un checkpoint charge (auto ou upload) ET plusieurs images 'good'.")
             st.stop()
 
-        with tempfile.NamedTemporaryFile(suffix=".ckpt", delete=False) as f:
-            f.write(ckpt_file.read())
-            ckpt_path = f.name
-
         with st.spinner("Chargement du modele..."):
-            model, device = load_model(ckpt_path)
+            model, device = load_model(ckpt_source_path)
 
         good_scores = []
         rows = []
