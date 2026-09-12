@@ -136,7 +136,7 @@ def _run_analysis(model, device, items, threshold):
 with tab_images:
     st.caption(
         "Chaque image uploadee est traitee comme UN SEUL produit. "
-        "Uploade un checkpoint (sidebar) et une ou plusieurs images, puis lance l'analyse."
+        "Uploade une ou plusieurs images, puis lance l'analyse."
     )
     image_files = st.file_uploader(
         "Images de produits (une image = un produit)",
